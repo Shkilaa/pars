@@ -1,54 +1,59 @@
-# .github/workflows/parser.yml
-# Запускает парсер каждые 15 минут и вручную по кнопке “Run workflow”.
+
 
 name: realty-parser
 
 on:
-  schedule:                # ⏰ CRON-расписание (UTC)
-    - cron: '*/20 * * * *' #   
-  workflow_dispatch:       # ▶️ возможность запустить вручную из вкладки Actions
+  schedule:
+    - cron: "*/20 * * * *"    # ⏰ каждые 15 мин
+  workflow_dispatch:          # ▶️ ручной запуск
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      # 1) Клонируем репозиторий
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    # 1 ─ Клонируем репозиторий
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      # 2) Пытаемся скачать предыдущий offers.db
-      #    При первом запуске файла ещё нет, поэтому errors → ignore
-      - name: Restore DB artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: db
-          path: .
-          if-no-files-found: ignore   # ← ключевая строчка
+    # 2 ─ Скачиваем базу, если она уже была загружена ранее
+    - name: Restore DB
+      uses: actions/download-artifact@v4
+      continue-on-error: true         # ← нет файла ‑ это не ошибка
+      with:
+        name: db
+        path: .
+        if-no-files-found: ignore
 
-      # 3) Устанавливаем Python-среду
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'      # можно 3.10+
+    # 3 ─ Устанавливаем Python 3.11
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
 
-      # 4) Ставим зависимости
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    # 4 ─ Ставим зависимости:
+    #     • если есть requirements.txt – берём всё из него;
+    #     • иначе ставим только requests.
+    - name: Install deps
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        else
+          pip install requests
+        fi
 
-      # 5) Запускаем парсер
-      - name: Run parser
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          CHAT_IDS:     ${{ secrets.CHAT_IDS }}          # строка "id1,id2,id3"
-        run: python realty_fullfeed.py
+    # 5 ─ Запускаем парсер
+    - name: Run parser
+      env:
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        CHAT_IDS:     ${{ secrets.CHAT_IDS }}
+      run: python realty_fullfeed.py
 
-      # 6) Сохраняем/обновляем базу как артефакт
-      - name: Upload DB artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: db
-          path: offers.db
-          retention-days: 30            # хранить 30 дней (по-желанию)
+    # 6 ─ Сохраняем обновлённую offers.db как артефакт
+    - name: Save DB
+      uses: actions/upload-artifact@v4
+      with:
+        name: db
+        path: offers.db
+        retention-days: 30
