@@ -80,15 +80,12 @@ def _tg_send_one(chat_id: int, text: str) -> None:
 
     while True:
         try:
-            r = requests.post(
-                TG_URL,
-                data={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": False,  # показываем превью
-                },
-                timeout=10,
+        r = requests.post(TG_URL, data={
+    "chat_id": chat_id,
+    "text": text,
+    "parse_mode": "HTML",
+    "disable_web_page_preview": False   # ← показываем карточку
+}, timeout=10)
             )
             if r.status_code == 429:
                 retry = r.json()["parameters"]["retry_after"]
