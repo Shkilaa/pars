@@ -1,58 +1,53 @@
 # .github/workflows/parser.yml
-#
-# Workflow запускает ваш скрипт parser.py каждые 15 минут
-# и по кнопке «Run workflow».  Файл offers.db хранится в артефакте
-# db, поэтому база не теряется между запусками.
-# В репозитории НЕТ requirements.txt, поэтому ставим единственную
-# зависимость — requests — прямо командой pip install requests.
-
 name: realty-parser
 
 on:
   schedule:
-    - cron: "*/15 * * * *"          # ⏰ каждые 15 минут (UTC)
-  workflow_dispatch:                # ▶ ручной запуск
+    - cron: '*/15 * * * *'     # каждые 15 мин (UTC)
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-      # 1 — Клонируем репозиторий
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    # 1. Код
+    - uses: actions/checkout@v4
 
-      # 2 — Пробуем забрать предыдущую offers.db
-      - name: Restore DB
-        uses: actions/download-artifact@v4
-        continue-on-error: true              # если файла нет — не падаем
-        with:
-          name: db
-          path: .
-          if-no-files-found: ignore
+    # 2. Скачиваем предыдущий offers.db → _restore/
+    - name: Download DB artifact
+      id: restore
+      uses: actions/download-artifact@v4
+      continue-on-error: true
+      with:
+        name: db
+        path: _restore          # <-- кладём сюда
+        if-no-files-found: ignore
 
-      # 3 — Устанавливаем Python 3.11
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
+    # 3. Переносим файл в корень, если он существует
+    - name: Move DB to workspace root
+      if: hashFiles('_restore/offers.db') != ''
+      run: mv _restore/offers.db ./offers.db
 
-      # 4 — Ставим requests (requirements.txt в проекте нет)
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip requests
+    # 4. Python
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
 
-      # 5 — Запускаем парсер
-      - name: Run parser
-        env:
-          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-          CHAT_IDS:     ${{ secrets.CHAT_IDS }}   # строка «id1,id2,id3»
-        run: python parser.py                     # ← ваш основной файл
+    - name: Install deps
+      run: python -m pip install --upgrade pip requests
 
-      # 6 — Сохраняем/обновляем offers.db
-      - name: Upload DB
-        uses: actions/upload-artifact@v4
-        with:
-          name: db
-          path: offers.db
-          retention-days: 30
+    # 5. Запуск парсера
+    - name: Run parser
+      env:
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        CHAT_IDS:     ${{ secrets.CHAT_IDS }}
+      run: python parser.py
+
+    # 6. Загружаем обновлённую базу
+    - name: Upload DB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: db
+        path: offers.db
+        retention-days: 30
