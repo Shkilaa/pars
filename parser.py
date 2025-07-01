@@ -18,8 +18,20 @@ from typing import Dict, List, Tuple
 import requests
 
 # ----------------------------- НАСТРОЙКИ ----------------------------------
-TG_BOT_TOKEN = "6382600818:AAFljhqBfVcGW-tC0qoKk9PBpMHmrTr6ga4"
-CHAT_IDS: List[int] = [1228646346, 5553312047, 7750493935]
+import os
+import sys
+
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+CHAT_IDS = [
+    int(cid) for cid in os.getenv("CHAT_IDS", "").replace(" ", "").split(",") if cid
+]
+
+# Проверяем, всё ли есть
+if not TG_BOT_TOKEN:
+    sys.exit("❌ TG_BOT_TOKEN не задан в переменных окружения")
+if not CHAT_IDS:
+    sys.exit("❌ CHAT_IDS пуст. Укажите, например: 1228646346,5553312047")
+
 
 MAX_PRICE = 50_000
 ALLOWED_ROOMS = {1}
