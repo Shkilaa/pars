@@ -2,7 +2,7 @@ name: realty-parser
 
 on:
   schedule:
-    - cron:  '*/15 * * * *'   # каждые 15 минут (UTC)
+    - cron:  '*/20 * * * *'   # каждые 15 минут (UTC)
   workflow_dispatch:          # возможность запустить вручную из вкладки Actions
 
 jobs:
