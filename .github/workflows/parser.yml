@@ -1,10 +1,13 @@
 # .github/workflows/parser.yml
+# Стартует каждые 15 мин и по кнопке «Run workflow».
+# База offers.db хранится в кэше actions/cache → никакой повторной рассылки.
+
 name: realty-parser
 
 on:
   schedule:
-    - cron: '*/20 * * * *'     # каждые 15 мин (UTC)
-  workflow_dispatch:
+    - cron: "*/20 * * * *"          # ⏰ каждые 15 минут (UTC)
+  workflow_dispatch:                # ▶ ручной запуск
 
 jobs:
   run:
@@ -14,40 +17,25 @@ jobs:
     # 1. Код
     - uses: actions/checkout@v4
 
-    # 2. Скачиваем предыдущий offers.db → _restore/
-    - name: Download DB artifact
-      id: restore
-      uses: actions/download-artifact@v4
-      continue-on-error: true
+    # 2. Восстанавливаем (и в конце сохраняем) offers.db через cache
+    - name: Restore / save DB (cache)
+      uses: actions/cache@v3
       with:
-        name: db
-        path: _restore          # <-- кладём сюда
-        if-no-files-found: ignore
+        path: offers.db            # где лежит файл
+        key: offers-db             # постоянный ключ → один и тот же файл
+        # Если файл ещё не создан, cache просто пропустится.
 
-    # 3. Переносим файл в корень, если он существует
-    - name: Move DB to workspace root
-      if: hashFiles('_restore/offers.db') != ''
-      run: mv _restore/offers.db ./offers.db
-
-    # 4. Python
+    # 3. Python
     - uses: actions/setup-python@v4
       with:
-        python-version: '3.11'
+        python-version: "3.11"
 
     - name: Install deps
       run: python -m pip install --upgrade pip requests
 
-    # 5. Запуск парсера
+    # 4. Запускаем парсер
     - name: Run parser
       env:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         CHAT_IDS:     ${{ secrets.CHAT_IDS }}
       run: python parser.py
-
-    # 6. Загружаем обновлённую базу
-    - name: Upload DB artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: db
-        path: offers.db
-        retention-days: 30
