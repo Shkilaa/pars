@@ -1,0 +1,41 @@
+name: realty-parser
+
+on:
+  schedule:
+    - cron:  '*/15 * * * *'   # каждые 15 минут (UTC)
+  workflow_dispatch:          # возможность запустить вручную из вкладки Actions
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Клонируем код
+      - uses: actions/checkout@v4
+
+      # 2. Возвращаем предыдущую базу (если она уже была)
+      - name: Restore DB
+        uses: actions/download-artifact@v4
+        with:
+          name: db
+          path: .
+
+      # 3. Устанавливаем зависимости
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 4. Запускаем парсер
+      - name: Run parser
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_IDS:     ${{ secrets.CHAT_IDS }}
+        run: python realty_fullfeed.py
+
+      # 5. Сохраняем/обновляем файл offers.db как артефакт
+      - name: Save DB
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: db
+          path: offers.db
