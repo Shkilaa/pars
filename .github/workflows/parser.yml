@@ -48,7 +48,7 @@ jobs:
       env:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
         CHAT_IDS:     ${{ secrets.CHAT_IDS }}
-      run: python realty_fullfeed.py
+      run: python parser.py
 
     # 6 ─ Сохраняем обновлённую offers.db как артефакт
     - name: Save DB
