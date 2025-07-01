@@ -1,8 +1,11 @@
 # parser.py
 # -*- coding: utf-8 -*-
 """
-Парсер 1-комнатных квартир (≤50 000 ₽) с Циана и Яндекс.Недвижимости
-+ рассылка в Telegram (ссылка первой строкой → превью появляется).
+Парсер 1-комнатных квартир (≤ 50 000 ₽) с Циана и Яндекс.Недвижимости
+и рассылка объявлений в Telegram-чаты.  
+• каждое объявление отправляется в каждый чат ровно ОДИН раз;  
+• ссылка стоит первой строкой, поэтому Telegram показывает карточку-превью;  
+• итоговая «сводка» отменена — бот шлёт только сами квартиры.
 """
 
 from __future__ import annotations
@@ -22,13 +25,13 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_IDS = [int(i) for i in os.getenv("CHAT_IDS", "").replace(" ", "").split(",") if i]
 
 if not TG_BOT_TOKEN or not CHAT_IDS:
-    raise RuntimeError("TG_BOT_TOKEN или CHAT_IDS не заданы")
+    raise RuntimeError("TG_BOT_TOKEN или CHAT_IDS не заданы в переменных окружения")
 
 MAX_PRICE     = 50_000
 ALLOWED_ROOMS = {1}
 
 DB_FILE   = "offers.db"
-MSG_DELAY = 1.0                      # сек между сообщениями
+MSG_DELAY = 1.0                      # сек между личными сообщениями
 
 logging.basicConfig(format="%(asctime)s  %(levelname)s  %(message)s",
                     level=logging.INFO)
@@ -68,6 +71,7 @@ def db_conn() -> sqlite3.Connection:
 _last: Dict[int, float] = {}
 
 def tg_send(chat: int, text: str) -> None:
+    """Отправляет сообщение в chat с учётом лимитов Telegram."""
     wait = MSG_DELAY - (time.time() - _last.get(chat, 0))
     if wait > 0:
         time.sleep(wait)
@@ -76,23 +80,24 @@ def tg_send(chat: int, text: str) -> None:
         try:
             r = requests.post(
                 TG_URL,
-                data=dict(
-                    chat_id=chat,
-                    text=text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=False
-                ),
+                data={
+                    "chat_id": chat,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": False   # показываем превью-карточку
+                },
                 timeout=10,
             )
+
             if r.status_code == 429:
                 retry = r.json()["parameters"]["retry_after"]
-                logging.warning("429 для %s → пауза %s с", chat, retry)
+                logging.warning("429 для %s, пауза %s c", chat, retry)
                 time.sleep(retry)
                 continue
 
             if r.ok:
                 _last[chat] = time.time()
-                logging.info("Отправлено в %s", chat)
+                logging.info("Отправлено в чат %s", chat)
             else:
                 logging.error("[TG %s] %s", chat, r.text)
             break
@@ -104,7 +109,7 @@ def broadcast(text: str) -> None:
     for cid in CHAT_IDS:
         tg_send(cid, text)
 
-# ──────────────────────  ОБРАБОТКА ОБЪЯВЛЕНИЙ  ──────────────────────────
+# ──────────────────────────  ОБЪЯВЛЕНИЕ → ТЕКСТ  ─────────────────────────
 def accept(o: dict) -> bool:
     try:
         rooms = int(o["rooms"])
@@ -113,24 +118,31 @@ def accept(o: dict) -> bool:
     return rooms in ALLOWED_ROOMS and o["price"] <= MAX_PRICE
 
 def msg(o: dict) -> str:
+    """Ссылка первой строкой → Telegram формирует превью."""
     price = f"{o['price']:,}".replace(",", " ")
-    return f"{o['url']}\n<b>{price} ₽</b> · {o['rooms']}-к, {o['area']} м²\n{o['address']}"
+    return (
+        f"{o['url']}\n"
+        f"<b>{price} ₽</b> · {o['rooms']}-к, {o['area']} м²\n"
+        f"{o['address']}"
+    )
 
 def process(o: dict, conn: sqlite3.Connection) -> None:
+    """Сохраняем объявление и рассылаем тем чатам, где его ещё нет."""
     if not accept(o):
         return
+
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO offers VALUES "
-                "(:offer_id,:url,:price,:address,:area,:rooms,:date)", o)
+    cur.execute("INSERT OR IGNORE INTO offers "
+                "VALUES (:offer_id,:url,:price,:address,:area,:rooms,:date)", o)
 
     cur.execute("SELECT chat_id FROM sent WHERE offer_id=?", (o["offer_id"],))
-    done = {row[0] for row in cur.fetchall()}
-    for cid in (c for c in CHAT_IDS if c not in done):
+    already = {row[0] for row in cur.fetchall()}
+    for cid in (c for c in CHAT_IDS if c not in already):
         tg_send(cid, msg(o))
         cur.execute("INSERT OR IGNORE INTO sent VALUES (?,?)", (o["offer_id"], cid))
     conn.commit()
 
-# ─────────────────────────────  C I A N  ─────────────────────────────────
+# ─────────────────────────────  C I A Н  ─────────────────────────────────
 def cian_api() -> dict | None:
     q = {
         "jsonQuery": {
@@ -146,7 +158,8 @@ def cian_api() -> dict | None:
     }
     try:
         r = requests.post("https://api.cian.ru/search-offers/v2/search-offers-desktop/",
-                          headers=HEADERS, data=json.dumps(q, ensure_ascii=False),
+                          headers=HEADERS,
+                          data=json.dumps(q, ensure_ascii=False),
                           timeout=20)
         r.raise_for_status()
         return r.json()
@@ -165,20 +178,14 @@ def cian_offer(it: dict) -> dict:
         rooms=it["roomsCount"],
     )
 
-def parse_cian(conn: sqlite3.Connection) -> Tuple[int, int]:
+def parse_cian(conn: sqlite3.Connection) -> None:
     js = cian_api()
     if not js:
-        return 0, 0
-    tot = new = 0
+        return
     for it in js["data"]["offersSerialized"]:
-        tot += 1
-        before = conn.total_changes
         process(cian_offer(it), conn)
-        new += conn.total_changes - before
-    logging.info("[CIAN] %s / новых %s", tot, new)
-    return tot, new
 
-# ───────────────────────  YANDEX  REALTY  ────────────────────────────────
+# ─────────────────────────  YANDEX  REALTY  ──────────────────────────────
 def ya_api() -> dict | None:
     providers = ["search", "filters", "searchParams", "seo", "queryId",
                  "forms", "filtersParams", "searchPresets", "react-search-data"]
@@ -210,42 +217,29 @@ def ya_api() -> dict | None:
             time.sleep(pause)
 
 def ya_offer(it: dict) -> dict:
-    date_raw = it.get("updateDate") or it["creationDate"]
+    raw = it.get("updateDate") or it["creationDate"]
     return dict(
         url=it["shareUrl"],
         offer_id=it["offerId"],
-        date=date_raw.replace("T", " ").replace("Z", ""),
+        date=raw.replace("T", " ").replace("Z", ""),
         price=it["price"]["value"],
         address=it["location"]["address"],
         area=it["area"]["value"],
         rooms=it["roomsTotalKey"],
     )
 
-def parse_yandex(conn: sqlite3.Connection) -> Tuple[int, int]:
+def parse_yandex(conn: sqlite3.Connection) -> None:
     js = ya_api()
     if not js:
-        return 0, 0
-    tot = new = 0
+        return
     for it in js["response"]["search"]["offers"]["entities"]:
-        tot += 1
-        before = conn.total_changes
         process(ya_offer(it), conn)
-        new += conn.total_changes - before
-    logging.info("[YA] %s / новых %s", tot, new)
-    return tot, new
 
-# ───────────────────────────   MAIN   ────────────────────────────────────
+# ─────────────────────────────   MAIN   ──────────────────────────────────
 def main() -> None:
     with db_conn() as conn:
-        c_tot, c_new = parse_cian(conn)
-        y_tot, y_new = parse_yandex(conn)
-
-    if c_new or y_new:
-        broadcast(
-            f"ℹ️ <b>Сводка</b>\n"
-            f"Циан   — {c_tot} / новых {c_new}\n"
-            f"Яндекс — {y_tot} / новых {y_new}"
-        )
+        parse_cian(conn)
+        parse_yandex(conn)
 
 if __name__ == "__main__":
     main()
