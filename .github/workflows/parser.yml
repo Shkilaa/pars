@@ -3,7 +3,7 @@ name: realty-parser
 
 on:
   schedule:
-    - cron: '*/15 * * * *'     # каждые 15 мин (UTC)
+    - cron: '*/20 * * * *'     # каждые 15 мин (UTC)
   workflow_dispatch:
 
 jobs:
