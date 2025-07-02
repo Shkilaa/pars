@@ -1,11 +1,15 @@
 # parser.py
 # -*- coding: utf-8 -*-
 """
-Парсер 1-комнатных квартир (≤ 50 000 ₽) с Циана и Яндекс.Недвижимости.
-• ссылка объявления — первая строка: Telegram показывает карточку-превью;
-• одно и то же объявление уходит в конкретный чат строго ОДИН раз:
-  уникальность фиксируем по URL + chat_id (а не по offer_id);
-• сводки больше нет — бот шлёт только сами объявления.
+Парсер 1-комнатных квартир (≤ 50 000 ₽) с Циана и Яндекс.Недвижимости,
+рассылка объявлений в Telegram-чаты.
+
+• Ссылка объявления — первая строка → Telegram показывает карточку-превью.
+• Каждое объявление уходит в конкретный чат строго ОДИН раз
+  (уникальность фиксируется по URL + chat_id).
+• «Сводки» нет — бот шлёт только сами объявления.
+• При первом запуске с новой схемой выполняется миграция таблицы `sent`
+  на формат (url, chat_id), чтобы убрать дубли.
 """
 
 from __future__ import annotations
@@ -22,10 +26,11 @@ import requests
 
 # ────────────────────────────  ПАРАМЕТРЫ  ────────────────────────────────
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
-CHAT_IDS = [int(i) for i in os.getenv("CHAT_IDS", "").replace(" ", "").split(",") if i]
+CHAT_IDS = [int(i) for i in os.getenv("CHAT_IDS", "").replace(" ", "")
+            .split(",") if i]
 
 if not TG_BOT_TOKEN or not CHAT_IDS:
-    raise RuntimeError("TG_BOT_TOKEN или CHAT_IDS не заданы")
+    raise RuntimeError("TG_BOT_TOKEN и/или CHAT_IDS не заданы")
 
 MAX_PRICE     = 50_000
 ALLOWED_ROOMS = {1}
@@ -47,8 +52,11 @@ TG_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
 
 # ─────────────────────────────  БАЗА  ────────────────────────────────────
 def db_conn() -> sqlite3.Connection:
+    """Создаёт соединение и выполняет миграцию таблицы sent при необходимости."""
     conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
+
+    # актуальная схема
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS offers(
             offer_id INTEGER PRIMARY KEY,
@@ -60,19 +68,34 @@ def db_conn() -> sqlite3.Connection:
             date     TEXT
         );
         CREATE TABLE IF NOT EXISTS sent(
-            url      TEXT,
-            chat_id  INTEGER,
+            url     TEXT,
+            chat_id INTEGER,
             PRIMARY KEY (url, chat_id)
         );
     """)
+
+    # при старой схеме в sent нет колонки url — делаем миграцию
+    cur = conn.execute("PRAGMA table_info(sent);")
+    cols = {row[1] for row in cur.fetchall()}
+    if "url" not in cols:
+        logging.warning("⟲ миграция таблицы sent на формат (url, chat_id)")
+        conn.executescript("""
+            ALTER TABLE sent RENAME TO sent_old;
+            CREATE TABLE sent(
+                url     TEXT,
+                chat_id INTEGER,
+                PRIMARY KEY (url, chat_id)
+            );
+            DROP TABLE sent_old;   -- данные не переносим, чтобы избежать дублей
+        """)
     return conn
 
 # ───────────────────────  ОТПРАВКА В TELEGRAM  ──────────────────────────
-_last: Dict[int, float] = {}           # время последней отправки в чат
-_sent_this_run: set[str] = set()       # чтобы в один запуск не дублировать
+_last_sent: Dict[int, float] = {}       # время последней отправки в чат
+_sent_this_run: set[str] = set()        # защита от дублей внутри прогона
 
 def tg_send(chat: int, text: str) -> None:
-    pause = MSG_DELAY - (time.time() - _last.get(chat, 0))
+    pause = MSG_DELAY - (time.time() - _last_sent.get(chat, 0))
     if pause > 0:
         time.sleep(pause)
 
@@ -96,7 +119,7 @@ def tg_send(chat: int, text: str) -> None:
                 continue
 
             if r.ok:
-                _last[chat] = time.time()
+                _last_sent[chat] = time.time()
                 logging.info("Отправлено в чат %s", chat)
             else:
                 logging.error("[TG %s] %s", chat, r.text)
@@ -122,19 +145,19 @@ def msg(o: dict) -> str:
     )
 
 def process(o: dict, conn: sqlite3.Connection) -> None:
-    """Отправляем объявление, если эта URL ещё не уходила в чат."""
+    """Шлём объявление, если эта URL ещё не уходила в чат."""
     if not accept(o):
         return
 
     url = o["url"]
     cur = conn.cursor()
 
-    # Сохраняем объявление (у URL — уникальный индекс)
+    # объявление
     cur.execute("""INSERT OR IGNORE INTO offers
                    (offer_id,url,price,address,area,rooms,date)
                    VALUES (:offer_id,:url,:price,:address,:area,:rooms,:date)""", o)
 
-    # Узнаём, в какие чаты оно уже отправлялось
+    # чаты, куда уже ушла ссылка
     cur.execute("SELECT chat_id FROM sent WHERE url=?", (url,))
     delivered = {row[0] for row in cur.fetchall()}
 
@@ -165,10 +188,12 @@ def cian_api() -> dict | None:
         }
     }
     try:
-        r = requests.post("https://api.cian.ru/search-offers/v2/search-offers-desktop/",
-                          headers=HEADERS,
-                          data=json.dumps(q, ensure_ascii=False),
-                          timeout=20)
+        r = requests.post(
+            "https://api.cian.ru/search-offers/v2/search-offers-desktop/",
+            headers=HEADERS,
+            data=json.dumps(q, ensure_ascii=False),
+            timeout=20,
+        )
         r.raise_for_status()
         return r.json()
     except Exception as exc:
@@ -179,7 +204,8 @@ def cian_offer(it: dict) -> dict:
     return dict(
         url=it["fullUrl"],
         offer_id=it["id"],
-        date=datetime.fromtimestamp(it["addedTimestamp"]).strftime("%Y-%m-%d %H:%M:%S"),
+        date=datetime.fromtimestamp(it["addedTimestamp"])
+             .strftime("%Y-%m-%d %H:%M:%S"),
         price=it["bargainTerms"]["priceRur"],
         address=it["geo"]["userInput"],
         area=it["totalArea"],
@@ -209,8 +235,12 @@ def ya_api() -> dict | None:
     back = (1, 3)
     for i in range(1, 6):
         try:
-            r = requests.get("https://realty.yandex.ru/gate/react-page/get/",
-                             headers=HEADERS, params=params, timeout=20)
+            r = requests.get(
+                "https://realty.yandex.ru/gate/react-page/get/",
+                headers=HEADERS,
+                params=params,
+                timeout=20,
+            )
             if 500 <= r.status_code < 600:
                 raise requests.HTTPError(str(r.status_code), response=r)
             r.raise_for_status()
@@ -220,7 +250,8 @@ def ya_api() -> dict | None:
                 logging.error("[YA] %s", exc)
                 return None
             pause = random.uniform(*back) * i
-            logging.warning("[YA] попытка %s/5 — %s, пауза %.1f c", i, exc, pause)
+            logging.warning("[YA] попытка %s/5 — %s, пауза %.1f c",
+                            i, exc, pause)
             time.sleep(pause)
 
 def ya_offer(it: dict) -> dict:
