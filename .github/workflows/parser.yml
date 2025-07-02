@@ -1,39 +1,37 @@
 # .github/workflows/parser.yml
-# Стартует каждые 15 мин и по кнопке «Run workflow».
-# База offers.db хранится в кэше actions/cache → никакой повторной рассылки.
-
 name: realty-parser
 
 on:
-  schedule:
-    - cron: "*/20 * * * *"          # ⏰ каждые 15 минут (UTC)
-  workflow_dispatch:                # ▶ ручной запуск
+  schedule:          # раз в 15 мин
+    - cron: '*/15 * * * *'
+  workflow_dispatch: # запуск вручную
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
     steps:
-    # 1. Код
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4         # 1) код
 
-    # 2. Восстанавливаем (и в конце сохраняем) offers.db через cache
-    - name: Restore / save DB (cache)
+    # 2) кэш-шаг: новый key → всегда «save»; restore-keys подбирает посл. версию
+    - name: Cache DB
+      id: db-cache
       uses: actions/cache@v3
       with:
-        path: offers.db            # где лежит файл
-        key: offers-db             # постоянный ключ → один и тот же файл
-        # Если файл ещё не создан, cache просто пропустится.
+        path: offers.db
+        key: offers-db-${{ github.run_id }}          # <- уникален для run
+        restore-keys: |
+          offers-db-                                # ищем любой предыдущий
 
-    # 3. Python
+    # 3) Python
     - uses: actions/setup-python@v4
       with:
-        python-version: "3.11"
+        python-version: '3.11'
 
     - name: Install deps
       run: python -m pip install --upgrade pip requests
 
-    # 4. Запускаем парсер
+    # 4) запуск парсера
     - name: Run parser
       env:
         TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
