@@ -1,6 +1,6 @@
 # .github/workflows/parser.yml
 
-name: parser
+name: realty-parser
 
 on:
   schedule: # раз в час
@@ -37,6 +37,8 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
+          YANDEX_GEOCODER_API_KEY: ${{ secrets.YANDEX_GEOCODER_API_KEY }}
+          DESTINATION_ADDRESS: ${{ secrets.DESTINATION_ADDRESS }}
         run: python parser.py
         
       # 5) логирование статистики
@@ -55,6 +57,12 @@ jobs:
               cur.execute('SELECT COUNT(DISTINCT url) FROM sent')
               sent = cur.fetchone()[0]
               print(f'Отправлено уникальных: {sent}')
+              try:
+                  cur.execute('SELECT COUNT(*) FROM offers WHERE travel_time IS NOT NULL')
+                  with_time = cur.fetchone()[0]
+                  print(f'С временем в пути: {with_time}')
+              except:
+                  pass
               conn.close()
           except Exception as e:
               print(f'Ошибка статистики: {e}')
