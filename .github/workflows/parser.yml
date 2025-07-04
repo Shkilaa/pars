@@ -1,39 +1,68 @@
 # .github/workflows/parser.yml
+
 name: realty-parser
 
 on:
-  schedule:          # раз в 15 мин
-    - cron: '*/60 * * * *'
+  schedule: # раз в час (изменено с 15 минут для снижения нагрузки)
+    - cron: '0 * * * *'
   workflow_dispatch: # запуск вручную
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - uses: actions/checkout@v4         # 1) код
-
-    # 2) кэш-шаг: новый key → всегда «save»; restore-keys подбирает посл. версию
-    - name: Cache DB
-      id: db-cache
-      uses: actions/cache@v3
-      with:
-        path: offers.db
-        key: offers-db-${{ github.run_id }}          # <- уникален для run
-        restore-keys: |
-          offers-db-                                # ищем любой предыдущий
-
-    # 3) Python
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: Install deps
-      run: python -m pip install --upgrade pip requests
-
-    # 4) запуск парсера
-    - name: Run parser
-      env:
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        CHAT_IDS:     ${{ secrets.CHAT_IDS }}
-      run: python parser.py
+      - uses: actions/checkout@v4 # 1) код
+      
+      # 2) кэш-шаг: новый key → всегда «save»; restore-keys подбирает посл. версию
+      - name: Cache DB
+        id: db-cache
+        uses: actions/cache@v3
+        with:
+          path: offers.db
+          key: offers-db-${{ github.run_id }} # <- уникален для run
+          restore-keys: |
+            offers-db- # ищем любой предыдущий
+      
+      # 3) Python
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install deps
+        run: python -m pip install --upgrade pip requests
+      
+      # 4) запуск парсера
+      - name: Run parser
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          CHAT_IDS: ${{ secrets.CHAT_IDS }}
+        run: python parser.py
+        
+      # 5) логирование статистики (опционально)
+      - name: Show DB stats
+        run: |
+          if [ -f offers.db ]; then
+            echo "База данных существует"
+            python -c "
+            import sqlite3
+            conn = sqlite3.connect('offers.db')
+            cur = conn.cursor()
+            try:
+                cur.execute('SELECT COUNT(*) FROM offers')
+                print(f'Всего объявлений: {cur.fetchone()[0]}')
+                cur.execute('SELECT COUNT(DISTINCT url) FROM sent')
+                print(f'Отправлено уникальных: {cur.fetchone()[0]}')
+                cur.execute('SELECT COUNT(*) FROM offers WHERE source = \"cian\"')
+                cian = cur.fetchone()[0]
+                cur.execute('SELECT COUNT(*) FROM offers WHERE source = \"yandex\"')
+                yandex = cur.fetchone()[0]
+                print(f'Циан: {cian}, Яндекс: {yandex}')
+            except Exception as e:
+                print(f'Ошибка при получении статистики: {e}')
+            finally:
+                conn.close()
+            "
+          else
+            echo "База данных не найдена"
+          fi
