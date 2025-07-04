@@ -3,7 +3,7 @@
 name: realty-parser
 
 on:
-  schedule: # раз в час (изменено с 15 минут для снижения нагрузки)
+  schedule: # раз в час
     - cron: '0 * * * *'
   workflow_dispatch: # запуск вручную
 
@@ -39,7 +39,7 @@ jobs:
           CHAT_IDS: ${{ secrets.CHAT_IDS }}
         run: python parser.py
         
-      # 5) логирование статистики (опционально)
+      # 5) логирование статистики
       - name: Show DB stats
         run: |
           if [ -f offers.db ]; then
