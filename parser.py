@@ -17,6 +17,7 @@ import time
 import urllib.parse
 from typing import Dict, List, Optional
 import requests
+import math
 
 # ──────────────────────────── ПАРАМЕТРЫ ────────────────────────────────
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
@@ -104,9 +105,6 @@ def get_travel_time_simple(origin_address: str, destination_address: str) -> Opt
             logging.warning("Не удалось получить координаты для маршрута: %s -> %s", origin_address, destination_address)
             return None
         
-        # Простой расчет расстояния и примерного времени
-        import math
-        
         # Формула гаверсинуса для расчета расстояния
         lat1, lon1 = math.radians(origin_coords[0]), math.radians(origin_coords[1])
         lat2, lon2 = math.radians(dest_coords[0]), math.radians(dest_coords[1])
@@ -118,8 +116,8 @@ def get_travel_time_simple(origin_address: str, destination_address: str) -> Opt
         c = 2 * math.asin(math.sqrt(a))
         distance_km = 6371 * c
         
-        # Примерное время на общественном транспорте (средняя скорость 25 км/ч)
-        travel_time_hours = distance_km / 25
+        # Примерное время на общественном транспорте (средняя скорость 20 км/ч для Москвы)
+        travel_time_hours = distance_km / 20
         travel_time_minutes = round(travel_time_hours * 60)
         
         if travel_time_minutes < 60:
@@ -139,20 +137,20 @@ def get_travel_time(origin_address: str, destination_address: str) -> Optional[s
         return None
     
     try:
-        # Сначала пробуем API маршрутизации
+        # Получаем координаты обоих адресов
         origin_coords = get_coordinates(origin_address)
         dest_coords = get_coordinates(destination_address)
         
         if not origin_coords or not dest_coords:
             return None
         
-        # Пробуем Yandex Router API
+        # Пробуем Yandex Router API для общественного транспорта
         waypoints = f"{origin_coords[0]},{origin_coords[1]}|{dest_coords[0]},{dest_coords[1]}"
         
         params = {
             'apikey': YANDEX_GEOCODER_API_KEY,
             'waypoints': waypoints,
-            'mode': 'transit',
+            'type': 'transit',  # ИСПРАВЛЕНО: общественный транспорт
             'format': 'json'
         }
         
@@ -161,6 +159,8 @@ def get_travel_time(origin_address: str, destination_address: str) -> Optional[s
             params=params,
             timeout=15
         )
+        
+        logging.info("Yandex Router API ответ: статус %s для маршрута %s", response.status_code, origin_address)
         
         if response.status_code == 200:
             data = response.json()
@@ -181,12 +181,11 @@ def get_travel_time(origin_address: str, destination_address: str) -> Optional[s
                         return f"{hours}ч {minutes}мин"
         
         # Если API маршрутизации не работает, используем простой расчет
-        logging.info("Используем простой расчет времени для %s", origin_address)
+        logging.info("API маршрутизации не вернул данные, используем простой расчет для %s", origin_address)
         return get_travel_time_simple(origin_address, destination_address)
         
     except Exception as e:
         logging.error("Ошибка расчета маршрута: %s", e)
-        # Fallback на простой расчет
         return get_travel_time_simple(origin_address, destination_address)
 
 # ────────────────────── НОРМАЛИЗАЦИЯ URL ───────────────────────────────
