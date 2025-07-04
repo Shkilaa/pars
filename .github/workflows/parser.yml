@@ -1,6 +1,6 @@
 # .github/workflows/parser.yml
 
-name: realty-parser
+name: parser
 
 on:
   schedule: # раз в час
