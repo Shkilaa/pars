@@ -22,7 +22,7 @@ import requests
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_IDS = [int(x) for x in os.getenv("CHAT_IDS", "").replace(" ", "").split(",") if x]
 YANDEX_GEOCODER_API_KEY = os.getenv("YANDEX_GEOCODER_API_KEY")
-DESTINATION_ADDRESS = os.getenv("DESTINATION_ADDRESS", "Москва, Остановский проезд, 22с16")
+DESTINATION_ADDRESS = os.getenv("DESTINATION_ADDRESS", "Москва, Остаповский проезд, 22с16")
 
 if not TG_BOT_TOKEN or not CHAT_IDS:
     raise RuntimeError("TG_BOT_TOKEN или CHAT_IDS не заданы в переменных окружения")
@@ -72,6 +72,7 @@ def get_coordinates(address: str) -> Optional[tuple]:
         )
         
         if response.status_code != 200:
+            logging.warning("Geocoder API вернул статус %s для адреса: %s", response.status_code, address)
             return None
             
         data = response.json()
@@ -79,16 +80,18 @@ def get_coordinates(address: str) -> Optional[tuple]:
         try:
             pos = data['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
             lon, lat = pos.split()
+            logging.info("Координаты для '%s': %s, %s", address, lat, lon)
             return (float(lat), float(lon))
-        except (KeyError, IndexError, ValueError):
+        except (KeyError, IndexError, ValueError) as e:
+            logging.warning("Не удалось извлечь координаты для адреса '%s': %s", address, e)
             return None
             
     except Exception as e:
-        logging.error("Ошибка геокодирования для адреса %s: %s", address, e)
+        logging.error("Ошибка геокодирования для адреса '%s': %s", address, e)
         return None
 
-def get_travel_time(origin_address: str, destination_address: str) -> Optional[str]:
-    """Получаем время в пути на общественном транспорте."""
+def get_travel_time_simple(origin_address: str, destination_address: str) -> Optional[str]:
+    """Упрощенный расчет времени в пути через координаты."""
     if not YANDEX_GEOCODER_API_KEY:
         return None
     
@@ -98,12 +101,57 @@ def get_travel_time(origin_address: str, destination_address: str) -> Optional[s
         dest_coords = get_coordinates(destination_address)
         
         if not origin_coords or not dest_coords:
+            logging.warning("Не удалось получить координаты для маршрута: %s -> %s", origin_address, destination_address)
             return None
         
-        # Строим маршрут на общественном транспорте
+        # Простой расчет расстояния и примерного времени
+        import math
+        
+        # Формула гаверсинуса для расчета расстояния
+        lat1, lon1 = math.radians(origin_coords[0]), math.radians(origin_coords[1])
+        lat2, lon2 = math.radians(dest_coords[0]), math.radians(dest_coords[1])
+        
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+        c = 2 * math.asin(math.sqrt(a))
+        distance_km = 6371 * c
+        
+        # Примерное время на общественном транспорте (средняя скорость 25 км/ч)
+        travel_time_hours = distance_km / 25
+        travel_time_minutes = round(travel_time_hours * 60)
+        
+        if travel_time_minutes < 60:
+            return f"{travel_time_minutes} мин"
+        else:
+            hours = travel_time_minutes // 60
+            minutes = travel_time_minutes % 60
+            return f"{hours}ч {minutes}мин"
+        
+    except Exception as e:
+        logging.error("Ошибка расчета времени в пути: %s", e)
+        return None
+
+def get_travel_time(origin_address: str, destination_address: str) -> Optional[str]:
+    """Получаем время в пути на общественном транспорте."""
+    if not YANDEX_GEOCODER_API_KEY:
+        return None
+    
+    try:
+        # Сначала пробуем API маршрутизации
+        origin_coords = get_coordinates(origin_address)
+        dest_coords = get_coordinates(destination_address)
+        
+        if not origin_coords or not dest_coords:
+            return None
+        
+        # Пробуем Yandex Router API
+        waypoints = f"{origin_coords[0]},{origin_coords[1]}|{dest_coords[0]},{dest_coords[1]}"
+        
         params = {
             'apikey': YANDEX_GEOCODER_API_KEY,
-            'waypoints': f"{origin_coords[1]},{origin_coords[0]}|{dest_coords[1]},{dest_coords[0]}",
+            'waypoints': waypoints,
             'mode': 'transit',
             'format': 'json'
         }
@@ -114,28 +162,32 @@ def get_travel_time(origin_address: str, destination_address: str) -> Optional[s
             timeout=15
         )
         
-        if response.status_code != 200:
-            return None
+        if response.status_code == 200:
+            data = response.json()
             
-        data = response.json()
+            if 'route' in data and 'legs' in data['route']:
+                total_duration = 0
+                for leg in data['route']['legs']:
+                    if 'duration' in leg:
+                        total_duration += leg['duration']
+                
+                if total_duration > 0:
+                    duration_minutes = round(total_duration / 60)
+                    if duration_minutes < 60:
+                        return f"{duration_minutes} мин"
+                    else:
+                        hours = duration_minutes // 60
+                        minutes = duration_minutes % 60
+                        return f"{hours}ч {minutes}мин"
         
-        if 'route' not in data or not data['route']:
-            return None
-            
-        # Получаем время в пути в секундах
-        duration_seconds = data['route'][0]['duration']
-        duration_minutes = round(duration_seconds / 60)
-        
-        if duration_minutes < 60:
-            return f"{duration_minutes} мин"
-        else:
-            hours = duration_minutes // 60
-            minutes = duration_minutes % 60
-            return f"{hours}ч {minutes}мин"
+        # Если API маршрутизации не работает, используем простой расчет
+        logging.info("Используем простой расчет времени для %s", origin_address)
+        return get_travel_time_simple(origin_address, destination_address)
         
     except Exception as e:
-        logging.error("Ошибка расчета маршрута от %s: %s", origin_address, e)
-        return None
+        logging.error("Ошибка расчета маршрута: %s", e)
+        # Fallback на простой расчет
+        return get_travel_time_simple(origin_address, destination_address)
 
 # ────────────────────── НОРМАЛИЗАЦИЯ URL ───────────────────────────────
 def canon(url: str) -> str:
@@ -335,9 +387,15 @@ def process_offer(offer: dict, conn: sqlite3.Connection) -> None:
     content_hash = create_content_hash(offer)
     source = 'cian' if 'cian.ru' in url else 'yandex'
     
-    # Получаем время в пути
+    # Получаем время в пути с отладкой
+    logging.info("Рассчитываем время в пути для адреса: %s", offer['address'])
     travel_time = get_travel_time(offer['address'], DESTINATION_ADDRESS)
     offer['travel_time'] = travel_time
+    
+    if travel_time:
+        logging.info("Время в пути рассчитано: %s", travel_time)
+    else:
+        logging.warning("Не удалось рассчитать время в пути для: %s", offer['address'])
     
     cur = conn.cursor()
     
@@ -529,6 +587,7 @@ def parse_yandex(conn: sqlite3.Connection) -> None:
 def main() -> None:
     """Основная функция с улучшенной статистикой."""
     logging.info("Запуск парсера в %s", datetime.now())
+    logging.info("Целевой адрес: %s", DESTINATION_ADDRESS)
     
     with db_conn() as conn:
         cleanup_old_offers(conn)
