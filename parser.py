@@ -87,8 +87,16 @@ def canon(url: str) -> str:
 def create_content_hash(offer: dict) -> str:
     """Создаем хеш на основе ключевых характеристик объявления."""
     # Нормализуем адрес для более точного сравнения
-    address = offer['address'].lower().strip()
-    content = f"{offer['price']}_{offer['rooms']}_{offer['area']:.1f}_{address}"
+    address = str(offer['address']).lower().strip()
+    
+    # Безопасно преобразуем area в float
+    try:
+        area = float(offer['area'])
+        area_str = f"{area:.1f}"
+    except (ValueError, TypeError):
+        area_str = str(offer['area'])
+    
+    content = f"{offer['price']}_{offer['rooms']}_{area_str}_{address}"
     return hashlib.md5(content.encode('utf-8')).hexdigest()
 
 def db_conn() -> sqlite3.Connection:
@@ -328,13 +336,19 @@ def get_cian_data() -> dict | None:
 
 def parse_cian_offer(item: dict) -> dict:
     """Парсим объявление Циана в стандартный формат."""
+    # Безопасно извлекаем площадь
+    try:
+        area = float(item["totalArea"])
+    except (ValueError, TypeError):
+        area = 0.0
+    
     return {
         "url": item["fullUrl"],
         "offer_id": item["id"],
         "date": datetime.fromtimestamp(item["addedTimestamp"]).strftime("%Y-%m-%d %H:%M:%S"),
         "price": item["bargainTerms"]["priceRur"],
         "address": item["geo"]["userInput"],
-        "area": item["totalArea"],
+        "area": area,
         "rooms": item["roomsCount"],
     }
 
@@ -394,14 +408,27 @@ def get_yandex_data() -> dict | None:
 def parse_yandex_offer(item: dict) -> dict:
     """Парсим объявление Яндекса в стандартный формат."""
     date_raw = item.get("updateDate") or item["creationDate"]
+    
+    # Безопасно извлекаем площадь
+    try:
+        area = float(item["area"]["value"])
+    except (ValueError, TypeError, KeyError):
+        area = 0.0
+    
+    # Безопасно извлекаем количество комнат
+    try:
+        rooms = int(item["roomsTotalKey"])
+    except (ValueError, TypeError):
+        rooms = 1
+    
     return {
         "url": item["shareUrl"],
         "offer_id": item["offerId"],
         "date": date_raw.replace("T", " ").replace("Z", ""),
         "price": item["price"]["value"],
         "address": item["location"]["address"],
-        "area": item["area"]["value"],
-        "rooms": item["roomsTotalKey"],
+        "area": area,
+        "rooms": rooms,
     }
 
 def parse_yandex(conn: sqlite3.Connection) -> None:
