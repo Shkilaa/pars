@@ -2,12 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Парсер 1-комнатных квартир (≤ 50 000 ₽) с Циана и Яндекс.Недвижимости
-с рассылкой в Telegram-чаты.
-• URL объявления идёт первой строкой → Telegram показывает превью-карточку
-• Каждое объявление отправляется в конкретный чат строго ОДИН раз
-• Нормализация URL убирает дубликаты от query-параметров
-• Автоматическая миграция базы данных при обновлении структуры
-• Защита от дубликатов по содержимому объявлений
+с рассылкой в Telegram-чаты и расчетом времени в пути на общественном транспорте.
 """
 
 from __future__ import annotations
@@ -20,21 +15,26 @@ import random
 import sqlite3
 import time
 import urllib.parse
-from typing import Dict, List
+from typing import Dict, List, Optional
 import requests
 
 # ──────────────────────────── ПАРАМЕТРЫ ────────────────────────────────
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 CHAT_IDS = [int(x) for x in os.getenv("CHAT_IDS", "").replace(" ", "").split(",") if x]
+YANDEX_GEOCODER_API_KEY = os.getenv("YANDEX_GEOCODER_API_KEY")
+DESTINATION_ADDRESS = os.getenv("DESTINATION_ADDRESS", "Москва, Остановский проезд, 22с16")
 
 if not TG_BOT_TOKEN or not CHAT_IDS:
     raise RuntimeError("TG_BOT_TOKEN или CHAT_IDS не заданы в переменных окружения")
 
+if not YANDEX_GEOCODER_API_KEY:
+    logging.warning("YANDEX_GEOCODER_API_KEY не задан - время в пути не будет рассчитываться")
+
 MAX_PRICE = 50_000
 ALLOWED_ROOMS = {1}
 DB_FILE = "offers.db"
-MSG_DELAY = 1.0  # сек между личными сообщениями
-CLEANUP_DAYS = 30  # дни для очистки старых объявлений
+MSG_DELAY = 1.0
+CLEANUP_DAYS = 30
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
@@ -51,6 +51,92 @@ HEADERS = {
 
 TG_URL = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
 
+# ────────────────────── YANDEX MAPS INTEGRATION ───────────────────────────
+def get_coordinates(address: str) -> Optional[tuple]:
+    """Получаем координаты адреса через Yandex Geocoder API."""
+    if not YANDEX_GEOCODER_API_KEY:
+        return None
+    
+    try:
+        params = {
+            'apikey': YANDEX_GEOCODER_API_KEY,
+            'geocode': address,
+            'format': 'json',
+            'results': 1
+        }
+        
+        response = requests.get(
+            'https://geocode-maps.yandex.ru/1.x/',
+            params=params,
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
+        
+        try:
+            pos = data['response']['GeoObjectCollection']['featureMember'][0]['GeoObject']['Point']['pos']
+            lon, lat = pos.split()
+            return (float(lat), float(lon))
+        except (KeyError, IndexError, ValueError):
+            return None
+            
+    except Exception as e:
+        logging.error("Ошибка геокодирования для адреса %s: %s", address, e)
+        return None
+
+def get_travel_time(origin_address: str, destination_address: str) -> Optional[str]:
+    """Получаем время в пути на общественном транспорте."""
+    if not YANDEX_GEOCODER_API_KEY:
+        return None
+    
+    try:
+        # Получаем координаты обоих адресов
+        origin_coords = get_coordinates(origin_address)
+        dest_coords = get_coordinates(destination_address)
+        
+        if not origin_coords or not dest_coords:
+            return None
+        
+        # Строим маршрут на общественном транспорте
+        params = {
+            'apikey': YANDEX_GEOCODER_API_KEY,
+            'waypoints': f"{origin_coords[1]},{origin_coords[0]}|{dest_coords[1]},{dest_coords[0]}",
+            'mode': 'transit',
+            'format': 'json'
+        }
+        
+        response = requests.get(
+            'https://api.routing.yandex.net/v2/route',
+            params=params,
+            timeout=15
+        )
+        
+        if response.status_code != 200:
+            return None
+            
+        data = response.json()
+        
+        if 'route' not in data or not data['route']:
+            return None
+            
+        # Получаем время в пути в секундах
+        duration_seconds = data['route'][0]['duration']
+        duration_minutes = round(duration_seconds / 60)
+        
+        if duration_minutes < 60:
+            return f"{duration_minutes} мин"
+        else:
+            hours = duration_minutes // 60
+            minutes = duration_minutes % 60
+            return f"{hours}ч {minutes}мин"
+        
+    except Exception as e:
+        logging.error("Ошибка расчета маршрута от %s: %s", origin_address, e)
+        return None
+
 # ────────────────────── НОРМАЛИЗАЦИЯ URL ───────────────────────────────
 def canon(url: str) -> str:
     """Улучшенная нормализация URL с извлечением ID объявлений."""
@@ -58,7 +144,6 @@ def canon(url: str) -> str:
         p = urllib.parse.urlparse(url)
         netloc = p.netloc.lower().lstrip("www.")
         
-        # Сводим поддомены к основным доменам
         if netloc.endswith(".cian.ru"):
             netloc = "cian.ru"
         elif netloc.endswith(".yandex.ru"):
@@ -66,17 +151,14 @@ def canon(url: str) -> str:
         
         path = p.path.rstrip("/").lower()
         
-        # Извлекаем ID для более точной идентификации
         if "cian.ru" in netloc:
-            # Для Циана ID обычно в конце пути
             path_parts = path.split('/')
             if path_parts and path_parts[-1].isdigit():
                 return f"https://{netloc}/rent/flat/{path_parts[-1]}/"
         elif "yandex.ru" in netloc:
-            # Для Яндекса ID может быть в разных местах
             path_parts = path.split('/')
             for part in path_parts:
-                if part.isdigit() and len(part) > 5:  # ID обычно длинный
+                if part.isdigit() and len(part) > 5:
                     return f"https://{netloc}/offer/{part}/"
         
         return f"https://{netloc}{path}"
@@ -86,10 +168,8 @@ def canon(url: str) -> str:
 # ───────────────────────────── БАЗА ────────────────────────────────────
 def create_content_hash(offer: dict) -> str:
     """Создаем хеш на основе ключевых характеристик объявления."""
-    # Нормализуем адрес для более точного сравнения
     address = str(offer['address']).lower().strip()
     
-    # Безопасно преобразуем area в float
     try:
         area = float(offer['area'])
         area_str = f"{area:.1f}"
@@ -104,30 +184,29 @@ def db_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     
-    # Проверяем существующую структуру offers
     try:
         cur = conn.execute("PRAGMA table_info(offers);")
         offers_cols = {row[1] for row in cur.fetchall()}
     except:
         offers_cols = set()
     
-    # Проверяем существующую структуру sent
     try:
         cur = conn.execute("PRAGMA table_info(sent);")
         sent_cols = {row[1] for row in cur.fetchall()}
     except:
         sent_cols = set()
     
-    # Миграция offers: добавляем новые колонки
-    if "content_hash" not in offers_cols:
-        if offers_cols:  # Таблица есть, добавляем колонки
-            logging.warning("⟲ добавляем колонки content_hash и source в таблицу offers")
+    # Добавляем колонки для времени в пути и защиты от дубликатов
+    if "travel_time" not in offers_cols:
+        if offers_cols:
+            logging.warning("⟲ добавляем колонки content_hash, source и travel_time в таблицу offers")
             try:
                 conn.execute("ALTER TABLE offers ADD COLUMN content_hash TEXT;")
                 conn.execute("ALTER TABLE offers ADD COLUMN source TEXT;")
+                conn.execute("ALTER TABLE offers ADD COLUMN travel_time TEXT;")
             except sqlite3.OperationalError:
-                pass  # Колонки уже есть
-        else:  # Таблицы нет, создаем новую
+                pass
+        else:
             logging.info("Создаём таблицу offers с новой структурой")
             conn.execute("""
                 CREATE TABLE offers(
@@ -139,18 +218,17 @@ def db_conn() -> sqlite3.Connection:
                     area REAL,
                     rooms INT,
                     date TEXT,
-                    source TEXT
+                    source TEXT,
+                    travel_time TEXT
                 );
             """)
     
-    # Создаем индексы для быстрого поиска дубликатов
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_content_hash ON offers(content_hash);
         CREATE INDEX IF NOT EXISTS idx_price_rooms_area ON offers(price, rooms, area);
         CREATE INDEX IF NOT EXISTS idx_source_date ON offers(source, date);
     """)
     
-    # Миграция sent: пересоздаём, если структура не (url, chat_id)
     if sent_cols != {"url", "chat_id", "sent_date"}:
         logging.warning("⟲ пересоздаём таблицу sent с новой структурой")
         conn.executescript("""
@@ -171,11 +249,9 @@ def cleanup_old_offers(conn: sqlite3.Connection) -> None:
     cutoff_date = (datetime.now() - timedelta(days=CLEANUP_DAYS)).isoformat()
     cur = conn.cursor()
     
-    # Удаляем старые объявления
     cur.execute("DELETE FROM offers WHERE date < ?", (cutoff_date,))
     deleted_offers = cur.rowcount
     
-    # Удаляем записи об отправке для несуществующих объявлений
     cur.execute("DELETE FROM sent WHERE url NOT IN (SELECT url FROM offers)")
     deleted_sent = cur.rowcount
     
@@ -202,7 +278,7 @@ def tg_send(chat: int, text: str) -> None:
                     "chat_id": chat,
                     "text": text,
                     "parse_mode": "HTML",
-                    "disable_web_page_preview": False  # показываем превью
+                    "disable_web_page_preview": False
                 },
                 timeout=10,
             )
@@ -234,24 +310,34 @@ def accept_offer(offer: dict) -> bool:
     return rooms in ALLOWED_ROOMS and offer["price"] <= MAX_PRICE
 
 def format_message(offer: dict) -> str:
-    """Форматируем сообщение: URL первой строкой для превью."""
+    """Форматируем сообщение с добавлением времени в пути."""
     price = f"{offer['price']:,}".replace(",", " ")
-    return (
+    
+    message = (
         f"{offer['url']}\n"
         f"{price} ₽ · {offer['rooms']}-к, {offer['area']} м²\n"
         f"{offer['address']}"
     )
+    
+    # Добавляем время в пути, если есть
+    if offer.get('travel_time'):
+        message += f"\n🚇 До места: {offer['travel_time']}"
+    
+    return message
 
 def process_offer(offer: dict, conn: sqlite3.Connection) -> None:
-    """Улучшенная обработка объявления с защитой от дубликатов."""
+    """Улучшенная обработка объявления с расчетом времени в пути."""
     if not accept_offer(offer):
         return
     
-    # Нормализуем URL и создаем хеш содержимого
     offer["url"] = canon(offer["url"])
     url = offer["url"]
     content_hash = create_content_hash(offer)
     source = 'cian' if 'cian.ru' in url else 'yandex'
+    
+    # Получаем время в пути
+    travel_time = get_travel_time(offer['address'], DESTINATION_ADDRESS)
+    offer['travel_time'] = travel_time
     
     cur = conn.cursor()
     
@@ -265,18 +351,17 @@ def process_offer(offer: dict, conn: sqlite3.Connection) -> None:
     
     existing = cur.fetchone()
     if existing:
-        logging.info("Дубликат обнаружен (ID: %s, URL: %s), пропускаем: %s", 
-                    existing[0], existing[1], url)
+        logging.info("Дубликат обнаружен (ID: %s), пропускаем: %s", existing[0], url)
         return
     
     # Сохраняем новое объявление
     try:
         cur.execute("""
             INSERT INTO offers
-            (offer_id, url, content_hash, price, address, area, rooms, date, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (offer_id, url, content_hash, price, address, area, rooms, date, source, travel_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (offer['offer_id'], url, content_hash, offer['price'], 
-              offer['address'], offer['area'], offer['rooms'], offer['date'], source))
+              offer['address'], offer['area'], offer['rooms'], offer['date'], source, travel_time))
         
         # Узнаём, в какие чаты уже отправляли
         cur.execute("SELECT chat_id FROM sent WHERE url=?", (url,))
@@ -298,7 +383,9 @@ def process_offer(offer: dict, conn: sqlite3.Connection) -> None:
             new_chats += 1
         
         conn.commit()
-        logging.info("Новое объявление добавлено и отправлено в %s чатов: %s", new_chats, url)
+        travel_info = f" (время в пути: {travel_time})" if travel_time else ""
+        logging.info("Новое объявление добавлено и отправлено в %s чатов: %s%s", 
+                    new_chats, url, travel_info)
         
     except sqlite3.IntegrityError:
         logging.warning("Объявление уже существует в базе: %s", url)
@@ -336,7 +423,6 @@ def get_cian_data() -> dict | None:
 
 def parse_cian_offer(item: dict) -> dict:
     """Парсим объявление Циана в стандартный формат."""
-    # Безопасно извлекаем площадь
     try:
         area = float(item["totalArea"])
     except (ValueError, TypeError):
@@ -409,13 +495,11 @@ def parse_yandex_offer(item: dict) -> dict:
     """Парсим объявление Яндекса в стандартный формат."""
     date_raw = item.get("updateDate") or item["creationDate"]
     
-    # Безопасно извлекаем площадь
     try:
         area = float(item["area"]["value"])
     except (ValueError, TypeError, KeyError):
         area = 0.0
     
-    # Безопасно извлекаем количество комнат
     try:
         rooms = int(item["roomsTotalKey"])
     except (ValueError, TypeError):
@@ -447,38 +531,28 @@ def main() -> None:
     logging.info("Запуск парсера в %s", datetime.now())
     
     with db_conn() as conn:
-        # Очистка старых записей
         cleanup_old_offers(conn)
         
-        # Статистика до парсинга
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM offers")
         offers_before = cur.fetchone()[0]
         
-        # Парсинг
         logging.info("Парсинг Циан...")
         parse_cian(conn)
         
         logging.info("Парсинг Яндекс...")
         parse_yandex(conn)
         
-        # Статистика после парсинга
         cur.execute("SELECT COUNT(*) FROM offers")
         offers_after = cur.fetchone()[0]
         
         cur.execute("SELECT COUNT(DISTINCT url) FROM sent")
         sent_offers = cur.fetchone()[0]
         
-        cur.execute("SELECT COUNT(*) FROM offers WHERE source = 'cian'")
-        cian_offers = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM offers WHERE source = 'yandex'")
-        yandex_offers = cur.fetchone()[0]
-        
         new_offers = offers_after - offers_before
         
-        logging.info("Статистика: новых объявлений: %s, всего: %s (Циан: %s, Яндекс: %s), отправлено: %s", 
-                    new_offers, offers_after, cian_offers, yandex_offers, sent_offers)
+        logging.info("Статистика: новых объявлений: %s, всего: %s, отправлено: %s", 
+                    new_offers, offers_after, sent_offers)
 
 if __name__ == "__main__":
     main()
