@@ -44,25 +44,21 @@ jobs:
         run: |
           if [ -f offers.db ]; then
             echo "База данных существует"
-            python -c "
-            import sqlite3
-            conn = sqlite3.connect('offers.db')
-            cur = conn.cursor()
-            try:
-                cur.execute('SELECT COUNT(*) FROM offers')
-                print(f'Всего объявлений: {cur.fetchone()[0]}')
-                cur.execute('SELECT COUNT(DISTINCT url) FROM sent')
-                print(f'Отправлено уникальных: {cur.fetchone()[0]}')
-                cur.execute('SELECT COUNT(*) FROM offers WHERE source = \"cian\"')
-                cian = cur.fetchone()[0]
-                cur.execute('SELECT COUNT(*) FROM offers WHERE source = \"yandex\"')
-                yandex = cur.fetchone()[0]
-                print(f'Циан: {cian}, Яндекс: {yandex}')
-            except Exception as e:
-                print(f'Ошибка при получении статистики: {e}')
-            finally:
-                conn.close()
-            "
+            python3 -c "
+          import sqlite3
+          try:
+              conn = sqlite3.connect('offers.db')
+              cur = conn.cursor()
+              cur.execute('SELECT COUNT(*) FROM offers')
+              total = cur.fetchone()[0]
+              print(f'Всего объявлений: {total}')
+              cur.execute('SELECT COUNT(DISTINCT url) FROM sent')
+              sent = cur.fetchone()[0]
+              print(f'Отправлено уникальных: {sent}')
+              conn.close()
+          except Exception as e:
+              print(f'Ошибка статистики: {e}')
+          "
           else
             echo "База данных не найдена"
           fi
